@@ -2,10 +2,14 @@ package command
 
 import (
 	"fmt"
+	"io"
+	"os"
 	"strings"
 
 	multierror "github.com/hashicorp/go-multierror"
 	hcl "github.com/hashicorp/hcl/v2"
+	"github.com/hashicorp/hcl/v2/hclsyntax"
+	"github.com/hashicorp/hcl/v2/hclwrite"
 	"github.com/posener/complete"
 )
 
@@ -13,7 +17,7 @@ const (
 	stdinArg = "-"
 )
 
-type FormatCommand struct {
+type FmtCommand struct {
 	Meta
 	list      bool
 	write     bool
@@ -22,7 +26,7 @@ type FormatCommand struct {
 	recursive bool
 }
 
-func (*FormatCommand) Help() string {
+func (*FmtCommand) Help() string {
 	helpText := `
 Usage: nomad fmt [options] [target...]
 
@@ -62,11 +66,11 @@ Format Options:
 	return strings.TrimSpace(helpText)
 }
 
-func (*FormatCommand) Synopsis() string {
+func (*FmtCommand) Synopsis() string {
 	return "Rewrites HCL2 config files to canonical format"
 }
 
-func (*FormatCommand) AutocompleteArgs() complete.Predictor {
+func (*FmtCommand) AutocompleteArgs() complete.Predictor {
 	return complete.PredictOr(
 		complete.PredictDirs("*"),
 		complete.PredictFiles("*.nomad"),
@@ -74,7 +78,7 @@ func (*FormatCommand) AutocompleteArgs() complete.Predictor {
 	)
 }
 
-func (*FormatCommand) AutocompleteFlags() complete.Flags {
+func (*FmtCommand) AutocompleteFlags() complete.Flags {
 	return complete.Flags{
 		"-list":      complete.PredictNothing,
 		"-check":     complete.PredictNothing,
@@ -84,7 +88,7 @@ func (*FormatCommand) AutocompleteFlags() complete.Flags {
 	}
 }
 
-func (c *FormatCommand) Run(args []string) int {
+func (c *FmtCommand) Run(args []string) int {
 	flagSet := c.Meta.FlagSet("fmt", FlagSetClient)
 	flagSet.Usage = func() { c.Ui.Output(c.Help()) }
 	flagSet.BoolVar(&c.list, "list", true, "")
@@ -109,9 +113,6 @@ func (c *FormatCommand) Run(args []string) int {
 		paths = args
 	}
 
-	c.Ui.Output(fmt.Sprintf("args: %+v", c))
-	c.Ui.Output(fmt.Sprintf("file paths: %+v", paths))
-
 	diags := c.fmt(paths)
 	if diags.HasErrors() {
 		mErr := multierror.Append(nil, diags.Errs()...)
@@ -124,10 +125,68 @@ func (c *FormatCommand) Run(args []string) int {
 	return 0
 }
 
-func (c *FormatCommand) fmt(paths []string) hcl.Diagnostics {
+func (c *FmtCommand) fmt(paths []string) hcl.Diagnostics {
 	var diags hcl.Diagnostics
 
-	// do work
+	for _, path := range paths {
+		// path could be stdin ("-"), or a file, or a directory
+		if path == stdinArg {
+			c.Ui.Info("processing stdin")
+			diags.Extend(c.processFile(path, os.Stdin, os.Stdout))
+			// TODO
+
+		} else {
+			info, _ := os.Stat(path)
+			switch {
+			case info.IsDir():
+				c.Ui.Info("processing directory")
+				// TODO
+
+			default:
+				c.Ui.Info("processing physical file")
+
+				f, err := os.Open(path)
+				if err != nil {
+					diags = diags.Append(&hcl.Diagnostic{
+						Severity: hcl.DiagError,
+						Summary:  fmt.Sprintf("Failed to open %s", path),
+						Detail:   fmt.Sprintf("%+v", err),
+					})
+				}
+
+				defer f.Close()
+				diags.Extend(c.processFile(path, f, os.Stdout))
+			}
+		}
+	}
+
+	return diags
+}
+
+func (c *FmtCommand) processFile(path string, r io.Reader, w io.Writer) hcl.Diagnostics {
+	var diags hcl.Diagnostics
+
+	src, err := io.ReadAll(r)
+	if err != nil {
+		diags = diags.Append(&hcl.Diagnostic{
+			Severity: hcl.DiagError,
+			Summary:  fmt.Sprintf("Failed to read %s", path),
+			Detail:   fmt.Sprintf("%+v", err),
+		})
+		return diags
+	}
+
+	// File must be parseable as HCL native syntax before we'll try to format
+	// it. If not, the formatter is likely to make drastic changes that would
+	// be hard for the user to undo.
+	_, syntaxDiags := hclsyntax.ParseConfig(src, path, hcl.Pos{Line: 1, Column: 1})
+	if syntaxDiags.HasErrors() {
+		diags = diags.Extend(syntaxDiags)
+		return diags
+	}
+
+	out := hclwrite.Format(src)
+	w.Write(out)
 
 	return diags
 }

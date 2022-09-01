@@ -326,7 +326,7 @@ func Commands(metaPtr *Meta, agentUi cli.Ui) map[string]cli.CommandFactory {
 			}, nil
 		},
 		"fmt": func() (cli.Command, error) {
-			return &FormatCommand{
+			return &FmtCommand{
 				Meta: meta,
 			}, nil
 		},
